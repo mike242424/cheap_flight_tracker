@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 import os
-from twilio.rest import Client
 import requests
+import smtplib
 
 # Load environment variables
 load_dotenv()
@@ -11,21 +11,26 @@ SHEETY_TOKEN = os.getenv('SHEETY_TOKEN')
 SHEETY_API_URL = os.getenv('SHEETY_API_URL')
 SERPI_API_KEY = os.getenv("SERPI_API_KEY")
 SERPI_GOOGLE_FLIGHTS_BASE_URL = os.getenv("SERPI_GOOGLE_FLIGHTS_BASE_URL")
-ACCOUNT_SID = os.getenv('ACCOUNT_SID')
-AUTH_TOKEN = os.getenv('AUTH_TOKEN')
-TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER')
-RECIPIENT_PHONE_NUMBER = os.getenv('RECIPIENT_PHONE_NUMBER')
+MY_EMAIL = os.getenv("MY_EMAIL")
+MY_PASSWORD = os.getenv("MY_PASSWORD")
 
-# Set Sheety headers and make API request
+# Set Sheety headers and make Sheety user API request
 sheety_headers = {"Authorization": f"Bearer {SHEETY_TOKEN}"}
-sheety_response = requests.get(SHEETY_API_URL, headers=sheety_headers)
-sheety_response.raise_for_status()
+sheety_users_response = requests.get(f'{SHEETY_API_URL}/users', headers=sheety_headers)
+sheety_users_response.raise_for_status()
+
+# Create empty email list
+email_list = [item['whatIsYourEmail?'] for item in sheety_users_response.json()['users']]
+
+# Make Sheety prices API request
+sheety_price_response = requests.get(f'{SHEETY_API_URL}/prices', headers=sheety_headers)
+sheety_price_response.raise_for_status()
 
 # Create a dictionary of IATA codes and lowest prices
-flight_dictionary = {code['iataCode']: code['lowestPrice'] for code in sheety_response.json()['prices']}
+flight_dictionary = {code['iataCode']: code['lowestPrice'] for code in sheety_price_response.json()['prices']}
 
-# Initialize Twilio client
-client = Client(ACCOUNT_SID, AUTH_TOKEN)
+# Initialize a list to store all flight deal messages
+all_flight_deals = []
 
 # Iterate over each destination and check for cheaper flights
 for iata_code, lowest_price in flight_dictionary.items():
@@ -49,14 +54,9 @@ for iata_code, lowest_price in flight_dictionary.items():
         print(f"No best flights found for destination {iata_code}")
         continue
 
-    # Flag to check if any cheaper flight was found
-    cheap_flight_found = False
-
     # Iterate over best flights
     for flight in best_flights['best_flights']:
         if flight['price'] < lowest_price:
-            cheap_flight_found = True
-
             # Identify the first and last flights in the itinerary
             first_flight = flight['flights'][0]
             last_flight = flight['flights'][-1]
@@ -72,18 +72,28 @@ for iata_code, lowest_price in flight_dictionary.items():
                 duration = single_flight['duration']
                 flight_details.append(f"{airline} {flight_number} ({duration} min)")
 
-            # Send SMS with the complete flight information
-            message_body = (
-                    f"Cheap flight found: Departure: {original_departure}, "
-                    f"Destination: {final_destination}, Total Duration: {flight['total_duration']} min.\n"
-                    f"Flight Details: " + ", ".join(flight_details)
+            # Append the flight deal message to the all_flight_deals list
+            flight_deal_message = (
+                f"Cheap flight found: Departure: {original_departure}, "
+                f"Destination: {final_destination}, Total Duration: {flight['total_duration']} min.\n"
+                f"Flight Details: " + ", ".join(flight_details) + "\n\n"
             )
-            message = client.messages.create(
-                body=message_body,
-                from_=TWILIO_PHONE_NUMBER,
-                to=RECIPIENT_PHONE_NUMBER,
-            )
+            all_flight_deals.append(flight_deal_message)
 
-    # If no cheaper flights were found, print a message
-    if not cheap_flight_found:
-        print('No cheap flights today...')
+# If there are any flight deals, send an email to the users
+if all_flight_deals:
+    # Combine all flight deal messages into one email body
+    email_body = "Here are the latest flight deals:\n\n" + "\n".join(all_flight_deals)
+
+    # Send the email to every email in the email list
+    for email in email_list:
+        with smtplib.SMTP(host='smtp.gmail.com', port=587) as connection:
+            connection.starttls()
+            connection.login(user=MY_EMAIL, password=MY_PASSWORD)
+            connection.sendmail(
+                from_addr=MY_EMAIL,
+                to_addrs=email,
+                msg=f'Subject: Flight Deals!\n\n{email_body}'
+            )
+else:
+    print('No cheap flights today...')
